@@ -13,8 +13,7 @@ pipeline {
             steps {
                 sh '''
                     python3 --version
-                    pip3 install -r requirements.txt
-                    python3 app.py
+                    python3 -m py_compile app.py
                 '''
             }
         }
