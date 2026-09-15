@@ -73,15 +73,31 @@ pipeline {
             }
         }
 
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh '''
+                    kubectl apply -f deployment.yaml
+                    kubectl apply -f service.yaml
+
+                    kubectl rollout restart deployment/python-demo
+                    kubectl rollout status deployment/python-demo
+
+                    kubectl get deployments
+                    kubectl get pods
+                    kubectl get svc
+                '''
+            }
+        }
+
     }
 
     post {
         success {
-            echo 'CI/CD PIPELINE SUCCESS'
+            echo 'CI/CD/KUBERNETES PIPELINE SUCCESS'
         }
 
         failure {
-            echo 'CI/CD PIPELINE FAILED'
+            echo 'CI/CD/KUBERNETES PIPELINE FAILED'
         }
     }
 }
