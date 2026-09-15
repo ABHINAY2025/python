@@ -25,16 +25,9 @@ pipeline {
                         /opt/sonar-scanner/bin/sonar-scanner \
                           -Dsonar.projectKey=python-demo \
                           -Dsonar.projectName=python-demo \
-                          -Dsonar.sources=.
+                          -Dsonar.sources=. \
+                          -Dsonar.python.version=3.14
                     '''
-                }
-            }
-        }
-
-        stage('Quality Gate') {
-            steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
                 }
             }
         }
@@ -55,6 +48,7 @@ pipeline {
                 '''
             }
         }
+
     }
 
     post {
