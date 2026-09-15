@@ -35,7 +35,7 @@ pipeline {
         stage('Docker Build') {
             steps {
                 sh '''
-                    docker build -t python-demo:${BUILD_NUMBER} .
+                    docker build --pull=false -t python-demo:${BUILD_NUMBER} .
                     docker tag python-demo:${BUILD_NUMBER} python-demo:latest
                 '''
             }
@@ -44,7 +44,19 @@ pipeline {
         stage('Docker Test') {
             steps {
                 sh '''
-                    docker run --rm python-demo:${BUILD_NUMBER}
+                    docker rm -f python-test || true
+
+                    docker run -d \
+                      --name python-test \
+                      -p 5000:5000 \
+                      python-demo:${BUILD_NUMBER}
+
+                    sleep 10
+
+                    curl -f http://localhost:5000
+
+                    docker stop python-test
+                    docker rm python-test
                 '''
             }
         }
@@ -80,7 +92,7 @@ pipeline {
                     kubectl apply -f service.yaml
 
                     kubectl rollout restart deployment/python-demo
-                    kubectl rollout status deployment/python-demo
+                    kubectl rollout status deployment/python-demo --timeout=180s
 
                     kubectl get deployments
                     kubectl get pods
@@ -90,14 +102,3 @@ pipeline {
         }
 
     }
-
-    post {
-        success {
-            echo 'CI/CD/KUBERNETES PIPELINE SUCCESS'
-        }
-
-        failure {
-            echo 'CI/CD/KUBERNETES PIPELINE FAILED'
-        }
-    }
-}
