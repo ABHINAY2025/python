@@ -49,15 +49,39 @@ pipeline {
             }
         }
 
+        stage('Docker Push') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'dockerhub-creds',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASS'
+                    )
+                ]) {
+                    sh '''
+                        echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+                        docker tag python-demo:${BUILD_NUMBER} $DOCKER_USER/python-demo:${BUILD_NUMBER}
+                        docker tag python-demo:${BUILD_NUMBER} $DOCKER_USER/python-demo:latest
+
+                        docker push $DOCKER_USER/python-demo:${BUILD_NUMBER}
+                        docker push $DOCKER_USER/python-demo:latest
+
+                        docker logout
+                    '''
+                }
+            }
+        }
+
     }
 
     post {
         success {
-            echo 'CI PIPELINE SUCCESS'
+            echo 'CI/CD PIPELINE SUCCESS'
         }
 
         failure {
-            echo 'CI PIPELINE FAILED'
+            echo 'CI/CD PIPELINE FAILED'
         }
     }
 }
