@@ -23,10 +23,10 @@ pipeline {
                 withSonarQubeEnv('SonarQube') {
                     sh '''
                         /opt/sonar-scanner/bin/sonar-scanner \
-                          -Dsonar.projectKey=python-demo \
-                          -Dsonar.projectName=python-demo \
-                          -Dsonar.sources=. \
-                          -Dsonar.python.version=3.14
+                        -Dsonar.projectKey=python-demo \
+                        -Dsonar.projectName=python-demo \
+                        -Dsonar.sources=. \
+                        -Dsonar.python.version=3.14
                     '''
                 }
             }
@@ -47,16 +47,16 @@ pipeline {
                     docker rm -f python-test || true
 
                     docker run -d \
-                      --name python-test \
-                      -p 5000:5000 \
-                      python-demo:${BUILD_NUMBER}
+                    --name python-test \
+                    -p 5000:5000 \
+                    python-demo:${BUILD_NUMBER}
 
                     sleep 10
 
                     curl -f http://localhost:5000
 
                     docker stop python-test
-                    docker rm python-test
+                    docker rm -f python-test
                 '''
             }
         }
@@ -100,5 +100,15 @@ pipeline {
                 '''
             }
         }
-
     }
+
+    post {
+        success {
+            echo 'CI/CD/KUBERNETES PIPELINE SUCCESS'
+        }
+
+        failure {
+            echo 'CI/CD/KUBERNETES PIPELINE FAILED'
+        }
+    }
+}
