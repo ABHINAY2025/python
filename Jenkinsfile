@@ -14,7 +14,7 @@ pipeline {
                 sh '''
                     python3 --version
                     pip3 install -r requirements.txt
-                    python3 hello_world.py
+                    python3 app.py
                 '''
             }
         }
