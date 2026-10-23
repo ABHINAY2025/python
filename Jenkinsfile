@@ -37,6 +37,7 @@ pipeline {
                         }
                     }
                     env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+                    env.TEST_CONTAINER = "python-demo-test-${env.JOB_NAME}-${env.BUILD_NUMBER}".toLowerCase().replaceAll(/[^a-z0-9_.-]/, '-')
                     echo "Source branch: ${env.SOURCE_BRANCH}"
                     echo "Versioned image: ${env.IMAGE_REPO}:${env.IMAGE_TAG}"
                 }
@@ -81,19 +82,24 @@ pipeline {
                 sh '''
                     set -eu
                     docker build --pull -t ${IMAGE_REPO}:${IMAGE_TAG} .
-                    docker rm -f python-demo-test >/dev/null 2>&1 || true
-                    docker run -d --name python-demo-test -p 127.0.0.1:15000:5000 ${IMAGE_REPO}:${IMAGE_TAG}
-                    trap 'docker rm -f python-demo-test >/dev/null 2>&1 || true' EXIT
+                    docker rm -f "${TEST_CONTAINER}" >/dev/null 2>&1 || true
+                    docker run -d --name "${TEST_CONTAINER}" -p 127.0.0.1::5000 "${IMAGE_REPO}:${IMAGE_TAG}"
+                    trap 'docker rm -f "${TEST_CONTAINER}" >/dev/null 2>&1 || true; rm -f "/tmp/${TEST_CONTAINER}.response.txt"' EXIT
+                    TEST_PORT="$(docker port "${TEST_CONTAINER}" 5000/tcp | sed -n '1s/.*://p')"
+                    if [ -z "$TEST_PORT" ]; then
+                      docker logs "${TEST_CONTAINER}"
+                      exit 1
+                    fi
                     attempt=0
-                    until [ "$(curl --silent --output /tmp/python-demo-response.txt --write-out '%{http_code}' http://127.0.0.1:15000/)" = '200' ]; do
+                    until [ "$(curl --silent --output "/tmp/${TEST_CONTAINER}.response.txt" --write-out '%{http_code}' "http://127.0.0.1:${TEST_PORT}/")" = '200' ]; do
                       attempt=$((attempt + 1))
                       if [ "$attempt" -ge 20 ]; then
-                        docker logs python-demo-test
+                        docker logs "${TEST_CONTAINER}"
                         exit 1
                       fi
                       sleep 2
                     done
-                    grep -F 'Hello from Kubernetes!' /tmp/python-demo-response.txt
+                    grep -F 'Hello from Kubernetes!' "/tmp/${TEST_CONTAINER}.response.txt"
                 '''
             }
         }
@@ -188,7 +194,7 @@ pipeline {
             echo 'CI/CD failed. Later deployment stages will not run.'
         }
         always {
-            sh 'docker rm -f python-demo-test >/dev/null 2>&1 || true'
+            sh 'if [ -n "$TEST_CONTAINER" ]; then docker rm -f "$TEST_CONTAINER" >/dev/null 2>&1 || true; fi'
         }
     }
 }
