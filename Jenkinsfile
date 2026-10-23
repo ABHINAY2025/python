@@ -1,17 +1,52 @@
 pipeline {
     agent any
 
-    stages {
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
 
+    environment {
+        IMAGE_REPO = 'abhinayma/python-demo'
+        SONARQUBE_SERVER = 'SonarQube'
+    }
+
+    stages {
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Python Test') {
+        stage('Validate Branch') {
+            steps {
+                script {
+                    env.SOURCE_BRANCH = env.CHANGE_BRANCH ?: (env.BRANCH_NAME ?: sh(script: 'git branch --show-current', returnStdout: true).trim())
+                    if (env.CHANGE_ID) {
+                        def featureToDevelop = env.SOURCE_BRANCH.startsWith('feature/') && env.CHANGE_TARGET == 'develop'
+                        def developToMain = env.SOURCE_BRANCH == 'develop' && env.CHANGE_TARGET == 'main'
+                        if (!(featureToDevelop || developToMain)) {
+                            error("Blocked pull request: only feature/* -> develop and develop -> main are allowed. Source='${env.SOURCE_BRANCH}', target='${env.CHANGE_TARGET}'.")
+                        }
+                    } else {
+                        def allowedBranch = env.SOURCE_BRANCH == 'develop' || env.SOURCE_BRANCH == 'main' || env.SOURCE_BRANCH.startsWith('feature/')
+                        if (!allowedBranch) {
+                            error("Blocked: branch '${env.SOURCE_BRANCH}' is not allowed. Use feature/*, develop, or main.")
+                        }
+                    }
+                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+                    echo "Source branch: ${env.SOURCE_BRANCH}"
+                    echo "Versioned image: ${env.IMAGE_REPO}:${env.IMAGE_TAG}"
+                }
+            }
+        }
+
+        stage('Python Checks') {
             steps {
                 sh '''
+                    set -eu
                     python3 --version
                     python3 -m py_compile app.py
                 '''
@@ -20,48 +55,53 @@ pipeline {
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('SonarQube') {
+                withSonarQubeEnv(env.SONARQUBE_SERVER) {
                     sh '''
+                        set -eu
                         /opt/sonar-scanner/bin/sonar-scanner \
-                        -Dsonar.projectKey=python-demo \
-                        -Dsonar.projectName=python-demo \
-                        -Dsonar.sources=. \
-                        -Dsonar.python.version=3.14
+                          -Dsonar.projectKey=python-demo \
+                          -Dsonar.projectName=python-demo \
+                          -Dsonar.sources=app.py \
+                          -Dsonar.python.version=3.12
                     '''
                 }
             }
         }
 
-        stage('Docker Build') {
+        stage('Enforce SonarQube Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build and Smoke Test Docker Image') {
             steps {
                 sh '''
-                    docker build --pull=false -t python-demo:${BUILD_NUMBER} .
-                    docker tag python-demo:${BUILD_NUMBER} python-demo:latest
+                    set -eu
+                    docker build --pull -t ${IMAGE_REPO}:${IMAGE_TAG} .
+                    docker rm -f python-demo-test >/dev/null 2>&1 || true
+                    docker run -d --name python-demo-test -p 127.0.0.1:15000:5000 ${IMAGE_REPO}:${IMAGE_TAG}
+                    trap 'docker rm -f python-demo-test >/dev/null 2>&1 || true' EXIT
+                    attempt=0
+                    until [ "$(curl --silent --output /tmp/python-demo-response.txt --write-out '%{http_code}' http://127.0.0.1:15000/)" = '200' ]; do
+                      attempt=$((attempt + 1))
+                      if [ "$attempt" -ge 20 ]; then
+                        docker logs python-demo-test
+                        exit 1
+                      fi
+                      sleep 2
+                    done
+                    grep -F 'Hello from Kubernetes!' /tmp/python-demo-response.txt
                 '''
             }
         }
 
-        stage('Docker Test') {
-            steps {
-                sh '''
-                    docker rm -f python-test || true
-
-                    docker run -d \
-                    --name python-test \
-                    -p 5000:5000 \
-                    python-demo:${BUILD_NUMBER}
-
-                    sleep 10
-
-                    curl -f http://localhost:5000
-
-                    docker stop python-test
-                    docker rm -f python-test
-                '''
+        stage('Publish Versioned Image') {
+            when {
+                expression { !env.CHANGE_ID && (env.BRANCH_NAME == 'develop' || env.BRANCH_NAME == 'main') }
             }
-        }
-
-        stage('Docker Push') {
             steps {
                 withCredentials([
                     usernamePassword(
@@ -71,32 +111,70 @@ pipeline {
                     )
                 ]) {
                     sh '''
+                        set -eu
                         echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
-
-                        docker tag python-demo:${BUILD_NUMBER} $DOCKER_USER/python-demo:${BUILD_NUMBER}
-                        docker tag python-demo:${BUILD_NUMBER} $DOCKER_USER/python-demo:latest
-
-                        docker push $DOCKER_USER/python-demo:${BUILD_NUMBER}
-                        docker push $DOCKER_USER/python-demo:latest
-
-                        docker logout
+                        trap 'docker logout >/dev/null 2>&1 || true' EXIT
+                        docker push "${IMAGE_REPO}:${IMAGE_TAG}"
                     '''
                 }
             }
         }
 
-        stage('Deploy to Kubernetes') {
+        stage('Deploy DEV') {
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'develop' } }
             steps {
                 sh '''
-                    kubectl apply -f deployment.yaml
-                    kubectl apply -f service.yaml
+                    set -eu
+                    kubectl apply -f k8s/namespaces.yaml
+                    sed 's|NAMESPACE_PLACEHOLDER|dev|g; s|IMAGE_PLACEHOLDER|${IMAGE_REPO}:${IMAGE_TAG}|g' k8s/deployment.yaml | kubectl apply -f -
+                    sed 's|NAMESPACE_PLACEHOLDER|dev|g' k8s/service.yaml | kubectl apply -f -
+                    kubectl rollout status deployment/python-demo -n dev --timeout=180s
+                    kubectl get pods,svc -n dev
+                '''
+            }
+        }
 
-                    kubectl rollout restart deployment/python-demo
-                    kubectl rollout status deployment/python-demo --timeout=180s
+        stage('Deploy QA') {
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'main' } }
+            steps {
+                sh '''
+                    set -eu
+                    kubectl apply -f k8s/namespaces.yaml
+                    sed 's|NAMESPACE_PLACEHOLDER|qa|g; s|IMAGE_PLACEHOLDER|${IMAGE_REPO}:${IMAGE_TAG}|g' k8s/deployment.yaml | kubectl apply -f -
+                    sed 's|NAMESPACE_PLACEHOLDER|qa|g' k8s/service.yaml | kubectl apply -f -
+                    kubectl rollout status deployment/python-demo -n qa --timeout=180s
+                    kubectl get pods,svc -n qa
+                '''
+            }
+        }
 
-                    kubectl get deployments
-                    kubectl get pods
-                    kubectl get svc
+        stage('QA Sign-off') {
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'main' } }
+            steps {
+                timeout(time: 2, unit: 'HOURS') {
+                    input message: "QA has tested ${IMAGE_REPO}:${IMAGE_TAG}. Confirm QA passed before production?", ok: 'QA passed', submitter: 'qa-team'
+                }
+            }
+        }
+
+        stage('Approve Production') {
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'main' } }
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input message: "Deploy the same tested image ${IMAGE_REPO}:${IMAGE_TAG} to production?", ok: 'Approve PROD', submitter: 'release-managers'
+                }
+            }
+        }
+
+        stage('Deploy PROD') {
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'main' } }
+            steps {
+                sh '''
+                    set -eu
+                    sed 's|NAMESPACE_PLACEHOLDER|prod|g; s|IMAGE_PLACEHOLDER|${IMAGE_REPO}:${IMAGE_TAG}|g' k8s/deployment.yaml | kubectl apply -f -
+                    sed 's|NAMESPACE_PLACEHOLDER|prod|g' k8s/service.yaml | kubectl apply -f -
+                    kubectl rollout status deployment/python-demo -n prod --timeout=180s
+                    kubectl get pods,svc -n prod
                 '''
             }
         }
@@ -104,11 +182,13 @@ pipeline {
 
     post {
         success {
-            echo 'CI/CD/KUBERNETES PIPELINE SUCCESS'
+            echo "CI/CD succeeded: source=${SOURCE_BRANCH}, image=${IMAGE_REPO}:${IMAGE_TAG}"
         }
-
         failure {
-            echo 'CI/CD/KUBERNETES PIPELINE FAILED'
+            echo 'CI/CD failed. Later deployment stages will not run.'
+        }
+        always {
+            sh 'docker rm -f python-demo-test >/dev/null 2>&1 || true'
         }
     }
 }
