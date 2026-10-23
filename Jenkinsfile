@@ -55,7 +55,7 @@ pipeline {
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv(SONARQUBE_SERVER) {
+                withSonarQubeEnv(env.SONARQUBE_SERVER) {
                     sh '''
                         set -eu
                         /opt/sonar-scanner/bin/sonar-scanner \
