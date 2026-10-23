@@ -24,12 +24,17 @@ pipeline {
             steps {
                 script {
                     env.SOURCE_BRANCH = env.CHANGE_BRANCH ?: (env.BRANCH_NAME ?: sh(script: 'git branch --show-current', returnStdout: true).trim())
-                    def allowed = env.CHANGE_ID || env.SOURCE_BRANCH == 'develop' || env.SOURCE_BRANCH == 'main' || env.SOURCE_BRANCH.startsWith('feature/')
-                    if (!allowed) {
-                        error("Blocked: branch '${env.SOURCE_BRANCH}' is not an allowed source. Use feature/*, develop, or main.")
-                    }
-                    if (env.CHANGE_ID && !env.SOURCE_BRANCH.startsWith('feature/')) {
-                        error("Blocked: pull requests must come from feature/* branches; source was '${env.SOURCE_BRANCH}'.")
+                    if (env.CHANGE_ID) {
+                        def featureToDevelop = env.SOURCE_BRANCH.startsWith('feature/') && env.CHANGE_TARGET == 'develop'
+                        def developToMain = env.SOURCE_BRANCH == 'develop' && env.CHANGE_TARGET == 'main'
+                        if (!(featureToDevelop || developToMain)) {
+                            error("Blocked pull request: only feature/* -> develop and develop -> main are allowed. Source='${env.SOURCE_BRANCH}', target='${env.CHANGE_TARGET}'.")
+                        }
+                    } else {
+                        def allowedBranch = env.SOURCE_BRANCH == 'develop' || env.SOURCE_BRANCH == 'main' || env.SOURCE_BRANCH.startsWith('feature/')
+                        if (!allowedBranch) {
+                            error("Blocked: branch '${env.SOURCE_BRANCH}' is not allowed. Use feature/*, develop, or main.")
+                        }
                     }
                     env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
                     echo "Source branch: ${env.SOURCE_BRANCH}"
