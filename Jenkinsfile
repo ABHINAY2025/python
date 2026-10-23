@@ -4,16 +4,22 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
+        skipDefaultCheckout()
         buildDiscarder(logRotator(numToKeepStr: '30'))
     }
 
     environment {
-        APP_NAME = 'python-demo'
         IMAGE_REPO = 'abhinayma/python-demo'
         SONARQUBE_SERVER = 'SonarQube'
     }
 
     stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
         stage('Validate Branch') {
             steps {
                 script {
@@ -103,7 +109,6 @@ pipeline {
                         set -eu
                         echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
                         trap 'docker logout >/dev/null 2>&1 || true' EXIT
-                        docker tag ${IMAGE_REPO}:${IMAGE_TAG} "${IMAGE_REPO}:${IMAGE_TAG}"
                         docker push "${IMAGE_REPO}:${IMAGE_TAG}"
                     '''
                 }
