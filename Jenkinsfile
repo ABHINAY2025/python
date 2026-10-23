@@ -14,24 +14,20 @@ pipeline {
     }
 
     stages {
-        stage('Validate Branch and Version') {
+        stage('Validate Branch') {
             steps {
                 script {
-                    env.GIT_BRANCH_NAME = env.CHANGE_BRANCH ?: (env.BRANCH_NAME ?: sh(
-                        script: 'git branch --show-current',
-                        returnStdout: true
-                    ).trim())
-
-                    if (!(env.GIT_BRANCH_NAME == 'develop' ||
-                          env.GIT_BRANCH_NAME == 'main' ||
-                          env.GIT_BRANCH_NAME.startsWith('feature/') ||
-                          env.GIT_BRANCH_NAME.startsWith('release/'))) {
-                        error("Branch '${env.GIT_BRANCH_NAME}' is not allowed by this pipeline.")
+                    env.SOURCE_BRANCH = env.CHANGE_BRANCH ?: (env.BRANCH_NAME ?: sh(script: 'git branch --show-current', returnStdout: true).trim())
+                    def allowed = env.CHANGE_ID || env.SOURCE_BRANCH == 'develop' || env.SOURCE_BRANCH == 'main' || env.SOURCE_BRANCH.startsWith('feature/')
+                    if (!allowed) {
+                        error("Blocked: branch '${env.SOURCE_BRANCH}' is not an allowed source. Use feature/*, develop, or main.")
                     }
-
+                    if (env.CHANGE_ID && !env.SOURCE_BRANCH.startsWith('feature/')) {
+                        error("Blocked: pull requests must come from feature/* branches; source was '${env.SOURCE_BRANCH}'.")
+                    }
                     env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
-                    echo "Branch: ${env.GIT_BRANCH_NAME}"
-                    echo "Image tag: ${env.IMAGE_TAG}"
+                    echo "Source branch: ${env.SOURCE_BRANCH}"
+                    echo "Versioned image: ${env.IMAGE_REPO}:${env.IMAGE_TAG}"
                 }
             }
         }
@@ -42,15 +38,6 @@ pipeline {
                     set -eu
                     python3 --version
                     python3 -m py_compile app.py
-                    python3 -m pip install --disable-pip-version-check -r requirements.txt
-                    python3 - <<'PY'
-from app import app
-client = app.test_client()
-response = client.get('/')
-assert response.status_code == 200, response.status_code
-assert response.get_data(as_text=True) == "Hello from Kubernetes!", response.get_data(as_text=True)
-print("Hello World route test passed")
-PY
                 '''
             }
         }
@@ -70,7 +57,15 @@ PY
             }
         }
 
-        stage('Build and Test Docker Image') {
+        stage('Enforce SonarQube Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build and Smoke Test Docker Image') {
             steps {
                 sh '''
                     set -eu
@@ -79,7 +74,7 @@ PY
                     docker run -d --name python-demo-test -p 127.0.0.1:15000:5000 ${IMAGE_REPO}:${IMAGE_TAG}
                     trap 'docker rm -f python-demo-test >/dev/null 2>&1 || true' EXIT
                     attempt=0
-                    until curl --fail --silent http://127.0.0.1:15000/; do
+                    until [ "$(curl --silent --output /tmp/python-demo-response.txt --write-out '%{http_code}' http://127.0.0.1:15000/)" = '200' ]; do
                       attempt=$((attempt + 1))
                       if [ "$attempt" -ge 20 ]; then
                         docker logs python-demo-test
@@ -87,17 +82,14 @@ PY
                       fi
                       sleep 2
                     done
+                    grep -F 'Hello from Kubernetes!' /tmp/python-demo-response.txt
                 '''
             }
         }
 
-        stage('Publish Immutable Image') {
+        stage('Publish Versioned Image') {
             when {
-                anyOf {
-                    branch 'develop'
-                    branch 'main'
-                    branch pattern: 'release/.+', comparator: 'REGEXP'
-                }
+                expression { !env.CHANGE_ID && (env.BRANCH_NAME == 'develop' || env.BRANCH_NAME == 'main') }
             }
             steps {
                 withCredentials([
@@ -111,58 +103,68 @@ PY
                         set -eu
                         echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
                         trap 'docker logout >/dev/null 2>&1 || true' EXIT
-                        docker tag ${IMAGE_REPO}:${IMAGE_TAG} "$DOCKER_USER/${APP_NAME}:${IMAGE_TAG}"
-                        docker push "$DOCKER_USER/${APP_NAME}:${IMAGE_TAG}"
+                        docker tag ${IMAGE_REPO}:${IMAGE_TAG} "${IMAGE_REPO}:${IMAGE_TAG}"
+                        docker push "${IMAGE_REPO}:${IMAGE_TAG}"
                     '''
                 }
             }
         }
 
         stage('Deploy DEV') {
-            when { branch 'develop' }
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'develop' } }
             steps {
                 sh '''
                     set -eu
-                    kubectl apply -f k8s/dev/
-                    kubectl set image deployment/python-demo python-demo=${IMAGE_REPO}:${IMAGE_TAG} -n dev
+                    kubectl apply -f k8s/namespaces.yaml
+                    sed 's|NAMESPACE_PLACEHOLDER|dev|g; s|IMAGE_PLACEHOLDER|${IMAGE_REPO}:${IMAGE_TAG}|g' k8s/deployment.yaml | kubectl apply -f -
+                    sed 's|NAMESPACE_PLACEHOLDER|dev|g' k8s/service.yaml | kubectl apply -f -
                     kubectl rollout status deployment/python-demo -n dev --timeout=180s
+                    kubectl get pods,svc -n dev
                 '''
             }
         }
 
         stage('Deploy QA') {
-            when {
-                branch pattern: 'release/.+', comparator: 'REGEXP'
-            }
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'main' } }
             steps {
                 sh '''
                     set -eu
-                    kubectl apply -f k8s/qa/
-                    kubectl set image deployment/python-demo python-demo=${IMAGE_REPO}:${IMAGE_TAG} -n qa
+                    kubectl apply -f k8s/namespaces.yaml
+                    sed 's|NAMESPACE_PLACEHOLDER|qa|g; s|IMAGE_PLACEHOLDER|${IMAGE_REPO}:${IMAGE_TAG}|g' k8s/deployment.yaml | kubectl apply -f -
+                    sed 's|NAMESPACE_PLACEHOLDER|qa|g' k8s/service.yaml | kubectl apply -f -
                     kubectl rollout status deployment/python-demo -n qa --timeout=180s
+                    kubectl get pods,svc -n qa
                 '''
             }
         }
 
+        stage('QA Sign-off') {
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'main' } }
+            steps {
+                timeout(time: 2, unit: 'HOURS') {
+                    input message: "QA has tested ${IMAGE_REPO}:${IMAGE_TAG}. Confirm QA passed before production?", ok: 'QA passed', submitter: 'qa-team'
+                }
+            }
+        }
+
         stage('Approve Production') {
-            when { branch 'main' }
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'main' } }
             steps {
                 timeout(time: 30, unit: 'MINUTES') {
-                    input message: "Deploy ${IMAGE_REPO}:${IMAGE_TAG} to production?",
-                          ok: 'Approve PROD',
-                          submitter: 'release-managers'
+                    input message: "Deploy the same tested image ${IMAGE_REPO}:${IMAGE_TAG} to production?", ok: 'Approve PROD', submitter: 'release-managers'
                 }
             }
         }
 
         stage('Deploy PROD') {
-            when { branch 'main' }
+            when { expression { !env.CHANGE_ID && env.BRANCH_NAME == 'main' } }
             steps {
                 sh '''
                     set -eu
-                    kubectl apply -f k8s/prod/
-                    kubectl set image deployment/python-demo python-demo=${IMAGE_REPO}:${IMAGE_TAG} -n prod
+                    sed 's|NAMESPACE_PLACEHOLDER|prod|g; s|IMAGE_PLACEHOLDER|${IMAGE_REPO}:${IMAGE_TAG}|g' k8s/deployment.yaml | kubectl apply -f -
+                    sed 's|NAMESPACE_PLACEHOLDER|prod|g' k8s/service.yaml | kubectl apply -f -
                     kubectl rollout status deployment/python-demo -n prod --timeout=180s
+                    kubectl get pods,svc -n prod
                 '''
             }
         }
@@ -170,10 +172,10 @@ PY
 
     post {
         success {
-            echo "Pipeline succeeded: branch=${GIT_BRANCH_NAME}, image=${IMAGE_REPO}:${IMAGE_TAG}"
+            echo "CI/CD succeeded: source=${SOURCE_BRANCH}, image=${IMAGE_REPO}:${IMAGE_TAG}"
         }
         failure {
-            echo "Pipeline failed. No later stages should be treated as approved."
+            echo 'CI/CD failed. Later deployment stages will not run.'
         }
         always {
             sh 'docker rm -f python-demo-test >/dev/null 2>&1 || true'
