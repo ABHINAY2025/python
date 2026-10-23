@@ -13,7 +13,7 @@ A small Flask Hello World application used to demonstrate safe CI/CD promotion w
 
 Pull requests are intentionally limited to `feature/* -> develop` and `develop -> main`. The production rollout is not automatic: QA sign-off and an authorized production approver are required.
 
-Image tags use `<Jenkins build number>-<short Git commit SHA>`, for example `42-a1b2c3d`. Pipeline deployments never use `latest`, so the QA and PROD stages in a single main-branch run use the same versioned image tag.
+Image tags use `<Jenkins build number>-<short Git commit SHA>`, for example `main-42-a1b2c3d`. Pipeline deployments never use `latest`, so the QA and PROD stages in a single main-branch run use the same versioned image tag.
 
 ## Repository layout
 
