@@ -36,7 +36,8 @@ pipeline {
                             error("Blocked: branch '${env.SOURCE_BRANCH}' is not allowed. Use feature/*, develop, or main.")
                         }
                     }
-                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
+                    env.IMAGE_CHANNEL = env.BRANCH_NAME == 'develop' ? 'dev' : (env.BRANCH_NAME == 'main' ? 'main' : 'ci')
+                    env.IMAGE_TAG = "${env.IMAGE_CHANNEL}-${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
                     env.TEST_CONTAINER = "python-demo-test-${env.JOB_NAME}-${env.BUILD_NUMBER}".toLowerCase().replaceAll(/[^a-z0-9_.-]/, '-')
                     echo "Source branch: ${env.SOURCE_BRANCH}"
                     echo "Versioned image: ${env.IMAGE_REPO}:${env.IMAGE_TAG}"
